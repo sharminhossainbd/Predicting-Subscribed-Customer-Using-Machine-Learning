@@ -1,0 +1,268 @@
+---
+title: "ProjectFinal"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+# Data wrangling Library
+library(tidyverse)
+library(dplyr) 
+
+# Visualize data
+library(ggplot2)
+library(inspectdf)
+library(GGally)
+library(plotly)
+
+# SVM 
+library(e1071)
+
+# Splitting Data
+library(rsample)
+
+# Random Forest
+library(randomForest)
+
+# Smote for unbalanced data
+library(DMwR)
+
+# ROCR
+library(ROCR)
+
+# Confussion Matrix
+library(caret)
+
+# Decision Tree
+library(partykit)
+
+#Extra Installs
+library(dplyr)
+library(GGally)
+library(naivebayes)
+library(tidyr)
+library(plyr)
+
+
+source("matrix_result.R")
+source("metrics.R")
+```
+
+```{r}
+#Read the dataset and See summary
+telemark <- read.csv("bank_full.csv",sep=";")
+glimpse(telemark)
+
+#Checking if there is a missing value
+table(is.na(telemark))
+
+#Changing data types
+telemark <- telemark %>% 
+  mutate(job = as.factor(job),
+         marital = as.factor(marital),
+         education = as.factor(education),
+         default = as.factor(default),
+         housing = as.factor(housing),
+         loan = as.factor(loan),
+         contact = as.factor(contact),
+         month = as.factor(month),
+         poutcome = as.factor(poutcome),
+         subscribe = as.factor(y)) %>% 
+  select(-c(y))
+
+#Visualize numeric variables
+numericCols <- unlist(lapply(telemark, is.numeric))
+show_plot(inspect_num(telemark[,numericCols]))
+
+#Levels of response variable
+levels(telemark$subscribe)
+
+#Overall Data Structure
+summary(telemark)
+
+#Checking proportion of Response Variable (Found Imbalanced Dataset)
+prop.table(table(telemark$subscribe))
+
+#Checking correlation between predictor variables
+show_plot(inspect_cor(subset(telemark, select = -c(subscribe))))
+ggcorr(telemark, label = T)
+
+#Set up training & testing data
+set.seed(1)
+split <- initial_split(data = telemark, prop = 0.8, strata = subscribe)
+telemark_train <- training(split)
+telemark_test <- testing(split)
+
+#Checking proportion of Response Variable of training dataset (Found Imbalanced Dataset)
+prop.table(table(telemark_train$subscribe))
+
+#Applying Smote Technique
+telemark_train_upsample <- SMOTE(subscribe ~ ., as.data.frame(telemark_train), perc.over = 100, perc.under = 200)
+
+#Checking proportion of Response Variable of training dataset again (Found Balanced Dataset)
+prop.table(table(telemark_train_upsample$subscribe))
+```
+
+```{r}
+matrix_result <- function(matrix, model_name) {
+  matrix_1 <- as.data.frame(t(as.matrix(matrix, what = "overall")))
+  matrix_2 <- as.data.frame(t(as.matrix(matrix, what = "classes")))
+  Model <- c(model_name)
+  matrix_result <- cbind(Model, matrix_1, matrix_2)
+  matrix_result <- matrix_result %>% select(Model, Accuracy, Sensitivity, Specificity, "Pos Pred Value")
+  return(matrix_result)
+}
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+#Applying Different Modeling
+
+#Decision Trees
+
+model_dtree <- ctree(subscribe ~ ., telemark_train_upsample)
+width(model_dtree)
+depth(model_dtree)
+
+dtree_prediction <- predict(model_dtree, telemark_test)
+dtree_prediction_raw <- predict(model_dtree, telemark_test,type = "prob")
+
+dtree_matrix <- confusionMatrix(dtree_prediction, telemark_test$subscribe, positive = "yes")
+dtree_matrix <- matrix_result(dtree_matrix, "Decision Tree")
+dtree_matrix
+
+model_dtree_tuning <- ctree(subscribe ~ ., telemark_train_upsample,
+                            control = ctree_control(mincriterion = 0.1, minsplit = 100, minbucket = 60))
+
+dtree_prediction_tuning <- predict(model_dtree_tuning, telemark_test)
+
+dtree_matrix_tuning <- confusionMatrix(dtree_prediction_tuning, telemark_test$subscribe)
+dtree_matrix_tuning <- matrix_result(dtree_matrix_tuning, "Decision Tree Tuning")
+dtree_matrix_tuning
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+#Random Forest
+
+ctrl <- trainControl(method = "repeatedcv", number = 5,repeats = 3)
+
+model_rforest <- train(subscribe ~ ., data = telemark_train_upsample, method = "rf", trControl = ctrl, ntree = 100)
+model_rforest
+
+varImp(model_rforest)
+
+model_rforest$finalModel
+
+plot(model_rforest$finalModel)
+legend("topright", colnames(model_rforest$finalModel$err.rate),col=1:6,cex=0.8,fill=1:6)
+
+rforest_predict <- predict(model_rforest, telemark_test)
+rforest_predict_raw <- predict(model_rforest, telemark_test, type = "prob")
+
+rforest_matrix <- confusionMatrix(rforest_predict, telemark_test$subscribe, positive = "yes")
+table <- as.table(rforest_matrix)
+table <- as.data.frame(table)
+
+rforest_matrix <- matrix_result(rforest_matrix, "Random Forest")
+rforest_matrix
+
+co <- seq(0.01,0.99,length=100)
+result <- matrix(0,100,4)
+
+# apply function metrics
+for(i in 1:100){
+  result[i,] = metrics(cutoff = co[i], 
+                       prob = rforest_predict_raw$yes, 
+                       ref = as.factor(ifelse(telemark_test$subscribe == "yes", 1, 0)), 
+                       postarget = "1", 
+                       negtarget = "0")
+}
+
+# visualize
+ggplotly(tibble("Recall" = result[,1],
+                "Accuracy" = result[,2],
+                "Precision" = result[,3],
+                "Specificity" = result[,4],
+                "Cutoff" = co) %>% 
+           gather(key = "Metrics", value = "value", 1:4) %>% 
+           ggplot(aes(x = Cutoff, y = value, col = Metrics)) +
+           geom_line(lwd = 1.5) +
+           scale_color_manual(values = c("darkred","darkgreen","orange", "blue")) +
+           scale_y_continuous(breaks = seq(0,1,0.1), limits = c(0,1)) +
+           scale_x_continuous(breaks = seq(0,1,0.1)) +
+           labs(title = "Tradeoff Model Perfomance") +
+           theme_minimal() +
+           theme(legend.position = "top",
+                 panel.grid.minor.y = element_blank(),
+                 panel.grid.minor.x = element_blank()))
+
+rforest_predict_tuning <- rforest_predict_raw %>%
+  mutate(label = as.factor(ifelse(yes >= 0.48, "yes", "no"))) %>% 
+  select(label)
+
+rforest_matrix_tuning <- confusionMatrix(rforest_predict_tuning$label, telemark_test$subscribe, positive = "yes")
+rforest_matrix_tuning <- matrix_result(rforest_matrix_tuning, "Random Forest Tuning")
+rforest_matrix_tuning
+```
+
+```{r}
+#SVM
+
+#For Linear
+model_svm<- svm(subscribe~., data = telemark_train_upsample, kernel = "linear", cost = 1, gamma = 1)
+svm_prediction <- predict(model_svm, telemark_test)
+svm_matrix <- confusionMatrix(svm_prediction, telemark_test$subscribe, positive = "yes")
+svm_matrix <- matrix_result(svm_matrix, "SVM")
+svm_matrix
+
+#For Radial
+model_svm1<- svm(subscribe~., data = telemark_train_upsample, kernel = "radial", cost = 1, gamma = 1)
+svm_prediction1 <- predict(model_svm1, telemark_test)
+svm_matrix1 <- confusionMatrix(svm_prediction1, telemark_test$subscribe, positive = "yes")
+svm_matrix1 <- matrix_result(svm_matrix1, "SVM")
+
+#Final Checking
+model_svm2<- svm(subscribe~., data = telemark_train_upsample, kernel = "linear", cost = 0.01, gamma = 1)
+svm_prediction2 <- predict(model_svm2, telemark_test)
+svm_matrix2 <- confusionMatrix(svm_prediction2, telemark_test$subscribe, positive = "yes")
+svm_matrix2 <- matrix_result(svm_matrix2, "SVM")
+svm_matrix2
+
+summary(model_svm2)
+
+svm_prediction_tuning <- predict(model_svm2, telemark_test)
+
+svm_matrix_tuning <- confusionMatrix(svm_prediction_tuning, telemark_test$subscribe)
+svm_matrix_tuning <- matrix_result(svm_matrix_tuning, "SVM Tuning")
+svm_matrix_tuning
+```
+
+```{r}
+#All Combined
+
+result <- rbind(dtree_matrix, dtree_matrix_tuning, rforest_matrix, rforest_matrix_tuning,svm_matrix2,svm_matrix_tuning)
+result
+
+result %>% arrange(desc(Sensitivity))
+```
